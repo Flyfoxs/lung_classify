@@ -1,2 +1,2 @@
 class_cnt: 5
-backbone: 'resnet34'
+backbone: 'resnet50'

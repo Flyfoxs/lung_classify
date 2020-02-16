@@ -1,0 +1,2 @@
+class_cnt: 2
+backbone: 'models.resnet34'

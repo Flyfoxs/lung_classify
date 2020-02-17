@@ -37,7 +37,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = '11'
+version = '12'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -111,10 +111,11 @@ def train(valid_fold , conf_name):
                  ]
 
     print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
+
+    if unfreeze:
+        learn.freeze_to(-3)
+
     learn.fit_one_cycle(epoch, callbacks=callbacks)
-    if unfreeze :
-        learn.freeze_to(-4)
-        learn.fit_one_cycle(epoch, callbacks=callbacks)
 
     oof_val = get_oof_df(learn, DatasetType.Valid)
 
@@ -138,8 +139,6 @@ def train(valid_fold , conf_name):
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)
 
-
-    del learn
 
 
 def get_backbone(backbone_name):

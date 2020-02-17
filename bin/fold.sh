@@ -7,10 +7,16 @@ mkdir -p log
 
 
 MODEL_NAMES=(
+  5cls_resnet50_unfreeze
+
   5cls_resnet50
-  5cls_resnet34
-  2cls_resnet34
-  2cls_resnet50
+  #5cls_resnet34
+
+#  5cls_densenet201
+#  5cls_densenet161
+#
+#  2cls_resnet34
+#  2cls_resnet50
 
 )
 

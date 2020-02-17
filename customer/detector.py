@@ -37,7 +37,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = '11'
+version = '10'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -67,16 +67,7 @@ def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
 
 
 
-def train(valid_fold , conf_name):
-
-    f = open(f'./configs/{conf_name}.yaml')
-    conf = edict(yaml.load(f))
-
-    class_cnt = conf.class_cnt
-    backbone_name = conf.backbone
-    unfreeze = conf.unfreeze if 'unfreeze' in conf else False
-    epoch = 5
-
+def train(valid_fold , class_cnt = 2, backbone_name = 'resnet34'):
     assert int(valid_fold) <= 4
     # batch_id = str(round(time.time()))
     backbone = get_backbone(backbone_name)
@@ -110,11 +101,9 @@ def train(valid_fold , conf_name):
                  SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement')
                  ]
 
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
+    epoch = 2
+    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, class_cnt:{class_cnt}, backbone:{backbone_name}=========')
     learn.fit_one_cycle(epoch, callbacks=callbacks)
-    if unfreeze :
-        learn.freeze_to(-4)
-        learn.fit_one_cycle(epoch, callbacks=callbacks)
 
     oof_val = get_oof_df(learn, DatasetType.Valid)
 
@@ -133,7 +122,7 @@ def train(valid_fold , conf_name):
     from sklearn.metrics import accuracy_score
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{conf_name}_f{valid_fold}_s{best_score:6.5f}_val{val_len}_trn{train_len}.h5'
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{backbone_name}_c{class_cnt}_f{valid_fold}_s{best_score:6.5f}_val{val_len}_trn{train_len}.h5'
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)
@@ -173,15 +162,18 @@ def my_config():
     conf_name = None
     fold = -1
 
-
 @ex.command()
 def main(_config):
     # pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
     config = edict(_config)
     conf_name = config.conf_name
     valid_fold = int(config.fold)
+    f = open(f'./configs/{conf_name}.yaml')
+    conf = edict(yaml.load(f))
+    from task_distribute.locker import task_locker
+    import sys
 
-    train(valid_fold, conf_name)
+    train(valid_fold=valid_fold, class_cnt=conf.class_cnt, backbone_name=conf.backbone)
 
 if __name__ == '__main__':
 

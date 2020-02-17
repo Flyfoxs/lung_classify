@@ -42,7 +42,8 @@ import pandas as pd
 cfg = get_cfg()
 cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
 cfg.DATASETS.TRAIN = ("lung_train",)
-cfg.DATASETS.TEST = ("lung_val_4", "lung_val_2",)
+val_name = "lung_val_4"
+cfg.DATASETS.TEST = (val_name,)
 
 cfg.DATALOADER.NUM_WORKERS = 2
 cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/retinanet_R_101_FPN_3x.yaml")  # Let training initialize from model zoo
@@ -51,7 +52,7 @@ cfg.SOLVER.IMS_PER_BATCH = 2
 cfg.SOLVER.BASE_LR = 0.00025  # pick a good LR
 
 cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (ballon)
-cfg.TEST.EVAL_PERIOD = 100
+cfg.TEST.EVAL_PERIOD = 200
 
 
 BATCH_SIZE = 128
@@ -152,6 +153,45 @@ class _Trainer(DefaultTrainer):
         ret = super().build_hooks()
         return ret
 
+    def train(self, patience=3):
+        """
+        Args:
+            start_iter, max_iter (int): See docs above
+        """
+        logger = logging.getLogger(__name__)
+        logger.info("Starting training from iteration {}".format(self.start_iter))
+
+        self.iter = start_iter = self.start_iter
+        max_iter = self.max_iter = cfg.SOLVER.MAX_ITER
+
+        from detectron2.utils.events import EventStorage
+        with EventStorage(start_iter) as self.storage:
+            try:
+                self.before_train()
+                print('start_iter, max_iter', start_iter, max_iter)
+                for self.iter in range(start_iter, max_iter):
+                    self.before_step()
+                    self.run_step()
+                    self.after_step()
+                    if self.early_stop(patience): break
+            finally:
+                self.after_train()
+
+    def early_stop(self, patience):
+        logger = logging.getLogger(__name__)
+
+        if 'history' not in dir(self.storage) or 'historys' not in dir(self.storage):
+            return False
+        val_name = cfg.DATASETS.TEST[0]
+        logger.info(self.storage.historys())
+        tmp = self.storage.history(f'{val_name}/bbox/AP50').values()
+        logger.info(f'Score List:{tmp}')
+        if np.max([item[0] for item in tmp][-patience:]) < np.max([item[0] for item in tmp]) :
+            #最大值在不在最后几次评估
+            logger.info(f'Early stop with:{patience}, {tmp}')
+            return True
+        else:
+            return False
 
 def train_model(resume=True):
 
@@ -175,6 +215,8 @@ def gen_oof():
     # cfg.TEST.DETECTIONS_PER_IMAGE = 2
     # cfg.DATASETS.TEST = ("lung_val", )
     predictor = DefaultPredictor(cfg)
+
+
 
 
 if __name__ == '__main__':

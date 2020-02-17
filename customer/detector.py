@@ -1,3 +1,23 @@
+from detectron2.engine import DefaultTrainer
+from detectron2.config import get_cfg
+from detectron2.evaluation.coco_evaluation import COCOEvaluator
+
+from detectron2 import model_zoo
+from detectron2.engine import DefaultPredictor
+from detectron2.config import get_cfg
+from detectron2.utils.visualizer import Visualizer
+from detectron2.data import MetadataCatalog
+from detectron2.structures import BoxMode
+from functools import lru_cache
+
+import os
+import numpy as np
+import json
+import cv2
+import random
+
+
+
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -6,6 +26,7 @@ import os
 from task_distribute.locker import task_locker
 from file_cache.cache import file_cache, logger, timed
 
+#from tqdm._tqdm_notebook import tqdm_notebook as  tqdm
 
 from tqdm import tqdm, tqdm_notebook
 from glob import glob
@@ -15,183 +36,146 @@ from easydict import EasyDict as edict
 
 import warnings
 warnings.filterwarnings("ignore")
-import time
+
 import pandas as pd
 
+cfg = get_cfg()
+cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
+cfg.DATASETS.TRAIN = ("lung_train",)
+cfg.DATASETS.TEST = ("lung_val_4", "lung_val_2",)
+
+cfg.DATALOADER.NUM_WORKERS = 2
+cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/retinanet_R_101_FPN_3x.yaml")  # Let training initialize from model zoo
+cfg.SOLVER.IMS_PER_BATCH = 2
+
+cfg.SOLVER.BASE_LR = 0.00025  # pick a good LR
+
+cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (ballon)
+cfg.TEST.EVAL_PERIOD = 100
 
 
-from fastai import *
-from fastai.vision import *
-from fastai.widgets import *
-
-from fastai.callbacks import EarlyStoppingCallback,SaveModelCallback
-import pydevd_pycharm
-
-from easydict import EasyDict as edict
-import yaml, os
+BATCH_SIZE = 128
+cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = BATCH_SIZE  # faster, and good enough for this toy dataset (default: 512)
+cfg.SOLVER.MAX_ITER = 50000
 
 
-from sacred import Experiment
-from easydict import EasyDict as edict
-from sacred.observers import MongoObserver
+os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
 
 
+@lru_cache()
+def get_anotation_dicts(fold_name=None, box_cnt=None):
+    fold_map = {
+        'train': (0, 1, 2, 3),
+        'val_0': (0,),
+        'val_1': (1,),
+        'val_2': (2,),
+        'val_3': (3,),
+        'val_4': (4,),
+    }
+    fold = fold_map.get(fold_name)
+    cls = pd.read_csv('./input/train.csv', names=['filename', 'label'])  # .sample(100)
+    cls['fold'] = cls.filename % 5
+    if fold:
+        cls = cls.loc[cls.fold.isin(fold)]
+    if box_cnt is not None:
+        df = pd.read_csv('./input/train_bboxes.csv')
+        tmp = df.groupby('filename').filename.count().sort_values()
+        if box_cnt == 0:
+            cls = cls.loc[~cls.filename.isin(tmp.index)]
+        else:
+            tmp = tmp.loc[tmp == box_cnt]
+            cls = cls.loc[cls.filename.isin(tmp.index)]
 
-version = '10'
+    bbox = pd.read_csv('./input/train_bboxes.csv')
 
-def get_oof_df(learn, ds_type ):
-    res = learn.get_preds(ds_type=ds_type)
-    res = res[0].numpy()
-    label = None
-    if ds_type == DatasetType.Test:
-        index = learn.data.test_ds.items
-    elif ds_type == DatasetType.Valid:
-        index = learn.data.valid_ds.items
+    dataset_dicts = []
+    for idx, v in tqdm(cls.iterrows(), desc=f'gen_annotaion_{str(fold_name)}', total=len(cls)):
+        record = {}
+        filename = v["filename"]
+        # filename = os.path.join(img_dir, v["filename"])
+        height, width = 1024, 1024  # cv2.imread(f'input/train/{filename}.jpg').shape[:2]
+        # print(height, width)
 
-        label = [item.data for item in learn.data.valid_ds.y]
-    else:
-        print(ds_type)
-    index = [int(os.path.basename(file).split('.')[0])for file in list(index)]
-    df = pd.DataFrame(res, index=index)
-    if label is not None:
-        df['label'] = label
-    return df
+        record["file_name"] = f'input/train/{filename}.jpg'
+        record["image_id"] = idx
+        record["height"] = height
+        record["width"] = width
 
+        objs = []
+        for _, anno in bbox.loc[bbox.filename == v["filename"]].iterrows():
+            #             assert not anno["region_attributes"]
+            #             anno = anno["shape_attributes"]
+            #             px = anno["all_points_x"]
+            #             py = anno["all_points_y"]
+            #             poly = [(x + 0.5, y + 0.5) for x, y in zip(px, py)]
+            #             poly = [p for x in poly for p in x]
 
-def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
-    train.to_hdf(file_path, 'train', mode='a')
-    test.to_hdf(file_path, 'test', mode='a')
-    logger.info(f'OOF file save to :{file_path}')
-    return train, test
+            if len(anno) > 0:
+                # print(anno)
+                obj = {
+                    "bbox": [anno.x, anno.y, anno.width, anno.height],
+                    "bbox_mode": BoxMode.XYWH_ABS,
+                    "category_id": 0,
+                    "thing_classes": 'bz',
+                    "iscrowd": 0
+                }
+                objs.append(obj)
+        if objs:
+            record["annotations"] = objs
 
-
-
-
-def train(valid_fold , class_cnt = 2, backbone_name = 'resnet34'):
-    assert int(valid_fold) <= 4
-    # batch_id = str(round(time.time()))
-    backbone = get_backbone(backbone_name)
-
-    df = pd.read_csv('./input/train.csv', names=['file_name', 'label'])
-    df['fold'] = df.file_name%5
-    df['file_name'] = df.file_name.astype('str')+'.jpg'
-
-    #print(df.head(), df.shape)
-    if class_cnt <= 2:
-        df.label = np.where(df.label>=1, 1, 0)
-
-    data = (ImageList.from_df(df, './input/train/', )
-             .split_by_idx(df.loc[df.fold == valid_fold].index)
-             # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
-             .label_from_df()
-             # .add_test_folder('./input/test')
-             .transform(get_transforms(), size=200)
-             .databunch(bs=16)).normalize(imagenet_stats)
-
-    test_data = ImageList.from_folder(path="./input/test")
-
-    data.add_test(test_data)
-
-    #data.show_batch(rows=3, figsize=(15,15))
-
-    learn = cnn_learner(data, backbone, metrics=[ accuracy])
-
-    checkpoint_name = f'{backbone()._get_name()}_f{valid_fold}'
-    callbacks = [EarlyStoppingCallback(learn, monitor='accuracy', min_delta=1e-5, patience=5),
-                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement')
-                 ]
-
-    epoch = 2
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, class_cnt:{class_cnt}, backbone:{backbone_name}=========')
-    learn.fit_one_cycle(epoch, callbacks=callbacks)
-
-    oof_val = get_oof_df(learn, DatasetType.Valid)
-
-    oof_test = get_oof_df(learn, DatasetType.Test)
-
-    os.makedirs('./output/stacking/', exist_ok=True)
-    import socket
-    host_name = socket.gethostname()
-    # score_list = np.array(learn.recorder.metrics)
-    # best_epoch = np.argmax(score_list)
-    # best_score = np.max(score_list)
-    val_len = len(learn.data.valid_ds.items)
-    train_len = len(learn.data.train_ds.items)
+        if objs or box_cnt == 0:
+            dataset_dicts.append(record)
+    print(f'dataset_dicts={len(dataset_dicts)} with fold:{fold}, box_cnt:{box_cnt}')
+    return dataset_dicts
 
 
-    from sklearn.metrics import accuracy_score
-    best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
-
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{backbone_name}_c{class_cnt}_f{valid_fold}_s{best_score:6.5f}_val{val_len}_trn{train_len}.h5'
-
-    print(f'Stacking file save to:{oof_file}')
-    save_stack_feature(oof_val, oof_test, oof_file)
-
-
-    del learn
-
-
-def get_backbone(backbone_name):
-    if backbone_name == 'resnet34':
-        backbone = models.resnet34
-    elif backbone_name == 'resnet50':
-        backbone = models.resnet50
-    elif backbone_name == 'densenet161':
-        backbone = models.densenet161
-    elif backbone_name == 'densenet201':
-        backbone = models.densenet201
-    else:
-        raise Exception('No model')
-
-    return backbone
+from detectron2.data import DatasetCatalog, MetadataCatalog
+DatasetCatalog.clear()
+for d in ["train", "val_0", "val_1", "val_2", "val_3", "val_4"]:
+    name = "lung_" + d
+    if name not in DatasetCatalog.list():
+        print(d)
+        DatasetCatalog.register(name, lambda d=d: get_anotation_dicts(d))
+        MetadataCatalog.get(name).set(thing_classes=["bz"])
+metadata = MetadataCatalog.get("lung_train")
 
 
-###### sacred begin
-from sacred import Experiment
-from easydict import EasyDict as edict
-from sacred.observers import MongoObserver
-from sacred import SETTINGS
+class _Trainer(DefaultTrainer):
+    def __init__(self, cfg):
+        super().__init__(cfg)
 
-ex = Experiment('lung')
-db_url = 'mongodb://sample:password@10.10.20.103:27017/db?authSource=admin'
-ex.observers.append(MongoObserver(url=db_url, db_name='db'))
-SETTINGS.CAPTURE_MODE = 'sys'
+    def build_evaluator(cfg, dataset_name):
+        output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        return COCOEvaluator(dataset_name, cfg, True, output_folder)
 
-@ex.config
-def my_config():
-    conf_name = None
-    fold = -1
+    def build_hooks(self):
+        ret = super().build_hooks()
+        return ret
 
-@ex.command()
-def main(_config):
-    # pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
-    config = edict(_config)
-    conf_name = config.conf_name
-    valid_fold = int(config.fold)
-    f = open(f'./configs/{conf_name}.yaml')
-    conf = edict(yaml.load(f))
-    from task_distribute.locker import task_locker
-    import sys
 
-    train(valid_fold=valid_fold, class_cnt=conf.class_cnt, backbone_name=conf.backbone)
+def train_model(resume=True):
+
+    print(f'BATCH_SIZE={BATCH_SIZE}, MAX_ITER={cfg.SOLVER.MAX_ITER}')
+
+    trainer = _Trainer(cfg)
+
+    trainer.resume_or_load(resume=resume)
+
+    trainer.train()
+
+    trainer.storage.histories()
+
+
+def gen_oof():
+    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    print(cfg.MODEL.WEIGHTS)
+    ###cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.99   # set the testing threshold for this model
+    cfg.MODEL.RETINANET.SCORE_THRESH_TEST = 0.4  # set threshold for retinanet
+    cfg.MODEL.RETINANET.NMS_THRESH_TEST = 0.1
+    # cfg.TEST.DETECTIONS_PER_IMAGE = 2
+    # cfg.DATASETS.TEST = ("lung_val", )
+    predictor = DefaultPredictor(cfg)
+
 
 if __name__ == '__main__':
-
-    from sacred.arg_parser import get_config_updates
-    import sys
-    config_updates, named_configs = get_config_updates(sys.argv[1:])
-    conf_name = config_updates.get('conf_name')
-    fold = config_updates.get('fold')
-
-
-    locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', version=version)
-    task_id = f'lung_{conf_name}_{fold}'
-    #pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
-    with locker.lock_block(task_id=task_id) as lock_id:
-        if lock_id is not None:
-            ex.add_config({
-                'lock_id': lock_id,
-                'lock_name': task_id,
-                'version': version,
-            })
-            res = ex.run_commandline()
+    train_model()

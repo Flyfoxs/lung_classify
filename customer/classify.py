@@ -134,7 +134,7 @@ def train(valid_fold , conf_name):
     from sklearn.metrics import accuracy_score
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{conf_name}_f{valid_fold}_s{best_score:6.5f}_val{val_len}_trn{train_len}.h5'
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)

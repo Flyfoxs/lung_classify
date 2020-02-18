@@ -300,7 +300,7 @@ def main(_config):
     host_name = socket.gethostname()
     conf_name = 'retinanet'
     best_score = trainer.best_score
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{conf_name}_f{val_fold}_s{best_score:6.5f}_val{len(oof_val)}.h5'
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name}_f{val_fold}_val{len(oof_val)}.h5'
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)

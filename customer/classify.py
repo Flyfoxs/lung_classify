@@ -37,7 +37,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = '12'
+version = '13'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -191,7 +191,7 @@ if __name__ == '__main__':
     fold = config_updates.get('fold')
 
 
-    locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', version=version)
+    locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)
     task_id = f'lung_{conf_name}_{fold}'
     #pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
     with locker.lock_block(task_id=task_id) as lock_id:

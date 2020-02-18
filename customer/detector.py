@@ -39,29 +39,7 @@ warnings.filterwarnings("ignore")
 
 import pandas as pd
 
-cfg = get_cfg()
-cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
-cfg.DATASETS.TRAIN = ("lung_train",)
-val_name = "lung_val_4"
-cfg.DATASETS.TEST = (val_name,)
-
-cfg.DATALOADER.NUM_WORKERS = 2
-cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/retinanet_R_101_FPN_3x.yaml")  # Let training initialize from model zoo
-cfg.SOLVER.IMS_PER_BATCH = 2
-
-cfg.SOLVER.BASE_LR = 0.00025  # pick a good LR
-
-cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (ballon)
-cfg.TEST.EVAL_PERIOD = 200
-
-
-BATCH_SIZE = 128
-cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = BATCH_SIZE  # faster, and good enough for this toy dataset (default: 512)
-cfg.SOLVER.MAX_ITER = 50000
-
-
-os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-
+version = 'd03'
 
 @lru_cache()
 def get_anotation_dicts(fold_name=None, box_cnt=None):
@@ -140,6 +118,12 @@ for d in ["train", "val_0", "val_1", "val_2", "val_3", "val_4"]:
         MetadataCatalog.get(name).set(thing_classes=["bz"])
 metadata = MetadataCatalog.get("lung_train")
 
+def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
+    train.to_hdf(file_path, 'train', mode='a')
+    test.to_hdf(file_path, 'test', mode='a')
+    logger.info(f'OOF file save to :{file_path}')
+    return train, test
+
 
 class _Trainer(DefaultTrainer):
     def __init__(self, cfg):
@@ -162,7 +146,7 @@ class _Trainer(DefaultTrainer):
         logger.info("Starting training from iteration {}".format(self.start_iter))
 
         self.iter = start_iter = self.start_iter
-        max_iter = self.max_iter = cfg.SOLVER.MAX_ITER
+        max_iter = self.max_iter = self.cfg.SOLVER.MAX_ITER
 
         from detectron2.utils.events import EventStorage
         with EventStorage(start_iter) as self.storage:
@@ -173,12 +157,13 @@ class _Trainer(DefaultTrainer):
                     self.before_step()
                     self.run_step()
                     self.after_step()
-                    if self.iter % cfg.TEST.EVAL_PERIOD == 0 and self.iter > cfg.TEST.EVAL_PERIOD and self.early_stop(patience):
+                    if (self.iter+1) % self.cfg.TEST.EVAL_PERIOD == 0 and self.early_stop(patience):
                         break
             finally:
                 self.after_train()
 
     def early_stop(self, patience):
+
         logger = logging.getLogger(__name__)
 
         #logger.info(dir(self.storage))
@@ -186,28 +171,118 @@ class _Trainer(DefaultTrainer):
         # if 'history' not in dir(self.storage) or 'historys' not in dir(self.storage):
         #     return False
 
-        if len(cfg.DATASETS.TEST) == 1:
+        val_data_name = self.cfg.DATASETS.TEST[0]
+
+        if len(self.cfg.DATASETS.TEST) == 1:
             val_name = 'bbox/AP50'
         else:
-            val_name = cfg.DATASETS.TEST[0]
-            val_name = f'{val_name}/bbox/AP50'
+            val_name = f'{val_data_name}/bbox/AP50'
         #logger.info(f'==========={val_name}')
         his_dict = self.storage.histories()
-        # if val_nane not in his_dict:
-        #     logger.info(f'can not find {val_name} from {his_dict}' )
-        #     return False
         tmp = his_dict.get(val_name).values()
-        logger.info(f'Score List===:{tmp}')
-        if np.max([item[0] for item in tmp][-patience:]) < np.max([item[0] for item in tmp]) :
+        logger.info(f'Score List@{self.iter}===:{tmp}')
+
+        # Keep only score remove inter sn
+        tmp = [item[0] for item in tmp]
+
+        self.best_score = np.max(tmp)
+        if tmp[-1]>=np.max(tmp) :
+            self.checkpointer.save(self.cfg.best_model)
+
+        if np.max(tmp[-patience:]) < np.max(tmp) :
             #最大值在不在最后几次评估
             logger.info(f'Early stop with===:{patience}, {tmp}')
             return True
         else:
             return False
 
-def train_model(resume=True):
 
-    print(f'BATCH_SIZE={BATCH_SIZE}, MAX_ITER={cfg.SOLVER.MAX_ITER}')
+def get_oof(cfg, data_type='val_4'):
+    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, f"{cfg.best_model}.pth")
+    print(cfg.MODEL.WEIGHTS)
+    ###cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.99   # set the testing threshold for this model
+    cfg.MODEL.RETINANET.SCORE_THRESH_TEST = 0.4  # set threshold for retinanet
+    cfg.MODEL.RETINANET.NMS_THRESH_TEST = 0.2
+    # cfg.TEST.DETECTIONS_PER_IMAGE = 2
+
+
+    if data_type == 'test':
+        file_list = list(glob('./input/test/*.jpg'))
+    else:
+        # dataset_dicts = get_anotation_dicts(data_type)
+        # file_list = [item["file_name"] for item in dataset_dicts]
+        val_fold = int(data_type[-1])
+        file_list = list(glob('./input/train/*.jpg'))
+        file_list = [file for file in file_list if int(file.split('/')[-1].split('.')[0]) % 5 == val_fold]
+
+    predictor = DefaultPredictor(cfg)
+    res = []
+    for file_name in tqdm(file_list, desc=data_type):
+        # Predict Result
+        file_name = file_name
+        im = cv2.imread(file_name)
+        outputs = predictor(im)
+        res.append({'file_name': file_name, 'score': outputs.get('instances').get('scores').cpu().numpy()})
+
+    df = pd.DataFrame(res)
+    return df
+
+def get_local_cfg(val_fold = 4, BATCH_SIZE = 128):
+
+
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
+    cfg.DATASETS.TRAIN = ("lung_train",)
+
+    val_name = f"lung_val_{val_fold}"
+    cfg.best_model = f'best_{val_name}'
+    cfg.DATASETS.TEST = (val_name,)
+
+    cfg.DATALOADER.NUM_WORKERS = 2
+    cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
+        "COCO-Detection/retinanet_R_101_FPN_3x.yaml")  # Let training initialize from model zoo
+    cfg.SOLVER.IMS_PER_BATCH = 2
+
+    cfg.SOLVER.BASE_LR = 0.00025  # pick a good LR
+
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (ballon)
+    cfg.TEST.EVAL_PERIOD = 200
+
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = BATCH_SIZE  # faster, and good enough for this toy dataset (default: 512)
+    cfg.SOLVER.MAX_ITER = 50000
+
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+    return cfg
+
+
+###### sacred begin
+from sacred import Experiment
+from easydict import EasyDict as edict
+from sacred.observers import MongoObserver
+from sacred import SETTINGS
+
+ex = Experiment('lung_de')
+db_url = 'mongodb://sample:password@10.10.20.103:27017/db?authSource=admin'
+ex.observers.append(MongoObserver(url=db_url, db_name='db'))
+SETTINGS.CAPTURE_MODE = 'sys'
+
+@ex.config
+def my_config():
+    conf_name = None
+    fold = -1
+
+
+@ex.command()
+def main(_config):
+
+    val_fold = edict(_config).fold
+    batch_size = 128
+    resume = True
+
+    cfg = get_local_cfg(val_fold, batch_size)
+
+    print(f'BATCH_SIZE={batch_size}, MAX_ITER={cfg.SOLVER.MAX_ITER}')
 
     trainer = _Trainer(cfg)
 
@@ -215,21 +290,39 @@ def train_model(resume=True):
 
     trainer.train()
 
-    trainer.storage.histories()
 
+    # Begin to gen OOF file
+    oof_val = get_oof(cfg, f'val_{val_fold}')
+    oof_test = get_oof(cfg, 'test')
 
-def gen_oof():
-    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
-    print(cfg.MODEL.WEIGHTS)
-    ###cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.99   # set the testing threshold for this model
-    cfg.MODEL.RETINANET.SCORE_THRESH_TEST = 0.4  # set threshold for retinanet
-    cfg.MODEL.RETINANET.NMS_THRESH_TEST = 0.1
-    # cfg.TEST.DETECTIONS_PER_IMAGE = 2
-    # cfg.DATASETS.TEST = ("lung_val", )
-    predictor = DefaultPredictor(cfg)
+    os.makedirs('./output/stacking/', exist_ok=True)
+    import socket
+    host_name = socket.gethostname()
+    conf_name = 'retinanet'
+    best_score = trainer.best_score
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_{conf_name}_f{val_fold}_s{best_score:6.5f}_val{len(oof_val)}.h5'
 
-
+    print(f'Stacking file save to:{oof_file}')
+    save_stack_feature(oof_val, oof_test, oof_file)
 
 
 if __name__ == '__main__':
-    train_model(resume=False)
+
+    from sacred.arg_parser import get_config_updates
+    import sys
+    config_updates, named_configs = get_config_updates(sys.argv[1:])
+    conf_name = config_updates.get('conf_name')
+    fold = config_updates.get('fold')
+
+
+    locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)
+    task_id = f'lung_{conf_name}_{fold}'
+    #pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
+    with locker.lock_block(task_id=task_id) as lock_id:
+        if lock_id is not None:
+            ex.add_config({
+                'lock_id': lock_id,
+                'lock_name': task_id,
+                'version': version,
+            })
+            res = ex.run_commandline()

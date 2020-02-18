@@ -10,6 +10,8 @@ MODEL_NAMES=(
   5cls_resnet50_unfreeze
 
   5cls_resnet50
+
+  2cls_resnet50
   #5cls_resnet34
 
 #  5cls_densenet201

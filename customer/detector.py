@@ -173,22 +173,34 @@ class _Trainer(DefaultTrainer):
                     self.before_step()
                     self.run_step()
                     self.after_step()
-                    if self.early_stop(patience): break
+                    if self.iter % cfg.TEST.EVAL_PERIOD == 0 and self.iter > cfg.TEST.EVAL_PERIOD and self.early_stop(patience):
+                        break
             finally:
                 self.after_train()
 
     def early_stop(self, patience):
         logger = logging.getLogger(__name__)
 
-        if 'history' not in dir(self.storage) or 'historys' not in dir(self.storage):
-            return False
-        val_name = cfg.DATASETS.TEST[0]
-        logger.info(self.storage.historys())
-        tmp = self.storage.history(f'{val_name}/bbox/AP50').values()
-        logger.info(f'Score List:{tmp}')
+        #logger.info(dir(self.storage))
+
+        # if 'history' not in dir(self.storage) or 'historys' not in dir(self.storage):
+        #     return False
+
+        if len(cfg.DATASETS.TEST) == 1:
+            val_name = 'bbox/AP50'
+        else:
+            val_name = cfg.DATASETS.TEST[0]
+            val_name = f'{val_name}/bbox/AP50'
+        #logger.info(f'==========={val_name}')
+        his_dict = self.storage.histories()
+        # if val_nane not in his_dict:
+        #     logger.info(f'can not find {val_name} from {his_dict}' )
+        #     return False
+        tmp = his_dict.get(val_name).values()
+        logger.info(f'Score List===:{tmp}')
         if np.max([item[0] for item in tmp][-patience:]) < np.max([item[0] for item in tmp]) :
             #最大值在不在最后几次评估
-            logger.info(f'Early stop with:{patience}, {tmp}')
+            logger.info(f'Early stop with===:{patience}, {tmp}')
             return True
         else:
             return False
@@ -220,4 +232,4 @@ def gen_oof():
 
 
 if __name__ == '__main__':
-    train_model()
+    train_model(resume=False)

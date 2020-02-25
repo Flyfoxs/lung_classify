@@ -19,7 +19,7 @@ from tqdm import tqdm_notebook as tqdm
 
 import os
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 is_cuda = True
 
 import pandas as pd
@@ -151,7 +151,13 @@ class Net(nn.Module):
 
         from functools import partial
         create_backbone = partial(create_cnn_model, cut=None, pretrained=True, lin_ftrs=None, ps=0.5, custom_head=None, bn_final=False, concat_pool=True)
-        self.model_list = [create_backbone(item).cuda() for item in [models.resnet34, models.densenet161, models.vgg19_bn] ]
+        #self.create_backbone(item).cuda() for item in [models.resnet34, models.densenet161, models.vgg19_bn] ]
+
+        self.model_res = create_backbone(models.resnet34)
+
+        self.model_dense = create_backbone(models.densenet161)
+
+        self.model_vgg19_bn = create_backbone(models.vgg19_bn)
 
         self.fc3 = nn.Linear(128, 5)
 
@@ -161,23 +167,27 @@ class Net(nn.Module):
         # #x3 = self.model_vgg19_bn(x)
         #
         # x = x1 + x2 #+ x3
-        x_all = None
-        for sigle_model in self.model_list:
-            tmp = sigle_model(x)
-            x_all = tmp if x_all is None else x_all + tmp
+
+        #print('type', type(list(self._modules.values())[0]))
+        #print('self._modules.values', list(self._modules.values())[0])
+        #x_all = functools.reduce(lambda a, b: a(x) + b(x), list(self._modules.values())[:-1])
+
+        x_all = torch.zeros(1).cuda()
+        for sub_model in list(self._modules.values())[:-1]:
+            x_all = x_all + sub_model(x)
+        #x_all = self.model_res(x) + self.model_dense(x) + self.model_vgg19_bn(x) +
 
         x = self.fc3(x_all)
         return F.log_softmax(x, dim=1)
-
-
-Net()
-
 
 
 model = Net()
 if is_cuda:
     model.cuda()
 
+print(model)
+
+print(model._modules)
 
 optimizer = optim.SGD(model.parameters(),lr=0.01,momentum=0.5)
 

@@ -1,3 +1,0 @@
-class_cnt: 5
-backbone: 'resnet50'
-unfreeze: True

@@ -24,8 +24,8 @@ from fastai import *
 from fastai.vision import *
 from fastai.widgets import *
 
-from fastai.callbacks import EarlyStoppingCallback,SaveModelCallback
-import pydevd_pycharm
+from fastai.callbacks import EarlyStoppingCallback, SaveModelCallback, TrackerCallback
+from efficientnet_pytorch import EfficientNet
 
 from easydict import EasyDict as edict
 import yaml, os
@@ -37,7 +37,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = '13'
+version = 'n16'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -67,27 +67,58 @@ def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
 
 
 
+class Recorder_scared(Recorder):
+    "A `LearnerCallback` that records epoch, loss, opt and metric data during training."
+    _order=-10
+    def __init__(self, ex, learn:Learner, add_time:bool=True, silent:bool=True):
+        super().__init__(learn, add_time=add_time, silent=silent)
+        self.ex = ex
+
+    def on_epoch_end(self, epoch:int, num_batch:int, smooth_loss:Tensor,
+                     last_metrics:MetricsList, **kwargs:Any)->bool:
+        "Save epoch info: num_batch, smooth_loss, metrics."
+        self.nb_batches.append(num_batch)
+        if last_metrics is not None: self.val_losses.append(last_metrics[0])
+        else: last_metrics = [] if self.no_val else [None]
+        if len(last_metrics) > 1: self.metrics.append(last_metrics[1:])
+        self.format_stats([epoch, smooth_loss] + last_metrics, epoch)
+
+    def format_stats(self, stats:TensorOrNumList, epoch)->None:
+        "Format stats before printing."
+        str_stats = []
+        for name,stat in zip(self.names,stats):
+            if name != 'epoch':
+                self.ex.log_scalar(name, round(float(stat), 4), step=epoch)
+
+
 def train(valid_fold , conf_name):
 
-    f = open(f'./configs/{conf_name}.yaml')
+
+    file_name = conf_name
+    if not os.path.exists(file_name):
+        print(f'Can not find file:{file_name}')
+        file_name = f'./configs/{file_name}.yaml'
+    f = open(file_name)
     conf = edict(yaml.load(f))
 
-    class_cnt = conf.class_cnt
+
+    # class_cnt = 5
     backbone_name = conf.backbone
-    unfreeze = conf.unfreeze if 'unfreeze' in conf else False
-    epoch = 5
+    unfreeze = True #conf.unfreeze if 'unfreeze' in conf else False
+    epoch = 50
 
     assert int(valid_fold) <= 4
     # batch_id = str(round(time.time()))
-    backbone = get_backbone(backbone_name)
+
+
 
     df = pd.read_csv('./input/train.csv', names=['file_name', 'label'])
     df['fold'] = df.file_name%5
     df['file_name'] = df.file_name.astype('str')+'.jpg'
 
-    #print(df.head(), df.shape)
-    if class_cnt <= 2:
-        df.label = np.where(df.label>=1, 1, 0)
+    # #print(df.head(), df.shape)
+    # if class_cnt <= 2:
+    #     df.label = np.where(df.label>=1, 1, 0)
 
     data = (ImageList.from_df(df, './input/train/', )
              .split_by_idx(df.loc[df.fold == valid_fold].index)
@@ -103,17 +134,22 @@ def train(valid_fold , conf_name):
 
     #data.show_batch(rows=3, figsize=(15,15))
 
-    learn = cnn_learner(data, backbone, metrics=[ accuracy])
+    #learn = cnn_learner(data, backbone, metrics=[ accuracy])
+    from customer.create_network import get_network
+    model = get_network(backbone_name, data.c)
+    learn = Learner(data, model, metrics=[ accuracy])
 
-    checkpoint_name = f'{backbone()._get_name()}_f{valid_fold}'
+    ch_prefix = os.path.basename(file_name)
+    checkpoint_name = f'{ch_prefix}_f{valid_fold}'
     callbacks = [EarlyStoppingCallback(learn, monitor='accuracy', min_delta=1e-5, patience=5),
-                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement')
+                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement'),
+                 Recorder_scared(ex, learn )
                  ]
 
     print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
 
     if unfreeze:
-        learn.freeze_to(-3)
+        learn.freeze_to(-2)
 
     learn.fit_one_cycle(epoch, callbacks=callbacks)
 
@@ -134,26 +170,15 @@ def train(valid_fold , conf_name):
     from sklearn.metrics import accuracy_score
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
+    conf_name_base = os.path.basename(conf_name)
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name_base}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)
 
 
 
-def get_backbone(backbone_name):
-    if backbone_name == 'resnet34':
-        backbone = models.resnet34
-    elif backbone_name == 'resnet50':
-        backbone = models.resnet50
-    elif backbone_name == 'densenet161':
-        backbone = models.densenet161
-    elif backbone_name == 'densenet201':
-        backbone = models.densenet201
-    else:
-        raise Exception('No model')
 
-    return backbone
 
 
 ###### sacred begin
@@ -175,7 +200,7 @@ def my_config():
 
 @ex.command()
 def main(_config):
-    # pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
+
     config = edict(_config)
     conf_name = config.conf_name
     valid_fold = int(config.fold)
@@ -183,6 +208,10 @@ def main(_config):
     train(valid_fold, conf_name)
 
 if __name__ == '__main__':
+
+    """"
+    python -u customer/classify.py main with conf_name=5cls_resnet34  fold=0
+    """
 
     from sacred.arg_parser import get_config_updates
     import sys

@@ -1,4 +1,7 @@
 import logging
+
+from customer.create_network import get_backbone
+
 logging.basicConfig(level=logging.INFO)
 
 import pandas as pd
@@ -37,7 +40,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = 'n16'
+version = 'n16_tf2'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -120,6 +123,21 @@ def train(valid_fold , conf_name):
     # if class_cnt <= 2:
     #     df.label = np.where(df.label>=1, 1, 0)
 
+    def get_transforms(do_flip: bool = True, flip_vert: bool = False, max_rotate: float = 10., max_zoom: float = 1.1,
+                       max_lighting: float = 0.2, max_warp: float = 0.2, p_affine: float = 0.75,
+                       p_lighting: float = 0.75, xtra_tfms: Optional[Collection[Transform]] = None) -> Collection[Transform]:
+        "Utility func to easily create a list of flip, rotate, `zoom`, warp, lighting transforms."
+        res = [rand_crop()]
+        if do_flip:    res.append(dihedral_affine() if flip_vert else flip_lr(p=0.5))
+        if max_warp:   res.append(symmetric_warp(magnitude=(-max_warp, max_warp), p=p_affine))
+        if max_rotate: res.append(rotate(degrees=(-max_rotate, max_rotate), p=p_affine))
+        if max_zoom > 1: res.append(rand_zoom(scale=(1., max_zoom), p=p_affine))
+        if max_lighting:
+            res.append(brightness(change=(0.5 * (1 - max_lighting), 0.5 * (1 + max_lighting)), p=p_lighting))
+            res.append(contrast(scale=(1 - max_lighting, 1 / (1 - max_lighting)), p=p_lighting))
+        #       train                   , valid
+        return (res + listify(xtra_tfms)+zoom_crop(scale=0.1), zoom_crop(scale=0.1))
+
     data = (ImageList.from_df(df, './input/train/', )
              .split_by_idx(df.loc[df.fold == valid_fold].index)
              # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
@@ -127,17 +145,15 @@ def train(valid_fold , conf_name):
              # .add_test_folder('./input/test')
              .transform(get_transforms(), size=200)
              .databunch(bs=16)).normalize(imagenet_stats)
-
     test_data = ImageList.from_folder(path="./input/test")
-
     data.add_test(test_data)
 
-    #data.show_batch(rows=3, figsize=(15,15))
+    backbone = get_backbone(backbone_name)
+    learn = cnn_learner(data, backbone, metrics=[ accuracy])
 
-    #learn = cnn_learner(data, backbone, metrics=[ accuracy])
-    from customer.create_network import get_network
-    model = get_network(backbone_name, data.c)
-    learn = Learner(data, model, metrics=[ accuracy])
+    # from customer.create_network import get_network
+    # model = get_network(backbone_name, data.c)
+    # learn = Learner(data, model, metrics=[ accuracy])
 
     ch_prefix = os.path.basename(file_name)
     checkpoint_name = f'{ch_prefix}_f{valid_fold}'
@@ -149,7 +165,7 @@ def train(valid_fold , conf_name):
     print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
 
     if unfreeze:
-        learn.freeze_to(-2)
+        learn.freeze_to(-1)
 
     learn.fit_one_cycle(epoch, callbacks=callbacks)
 

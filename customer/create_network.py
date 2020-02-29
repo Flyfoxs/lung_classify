@@ -94,7 +94,7 @@ class Net(nn.Module):
             backbone_tmp = create_backbone(backbone_fn)
             setattr(self, f'ens_{network_name}', backbone_tmp)
 
-        self.fc3 = nn.Linear(128, nc)
+        self.fc3 = nn.Linear(128*len(subnet_list), nc)
 
     def forward(self, x):
         # x1 = self.model_res(x)
@@ -110,12 +110,14 @@ class Net(nn.Module):
         if len(list(self._modules.values())) == 1:
             return list(self._modules.values())[-1](x)
 
-        #print('==='*10, len(list(self._modules.values())))
-        x_all = torch.zeros(1).cuda()
-        for sub_model in list(self._modules.values())[:-1]:
-            x_all = x_all + sub_model(x)
+        # #print('==='*10, len(list(self._modules.values())))
+        # x_all = torch.ones(1).cuda()
+        # for sub_model in list(self._modules.values())[:-1]:
+        #     x_all = x_all * sub_model(x)
         #x_all = self.model_res(x) + self.model_dense(x) + self.model_vgg19_bn(x) +
 
+        mod_list = list(self._modules.values())[:-1]
+        x_all = torch.cat([item(x) for item in mod_list], -1)
         return self.fc3(x_all)
 
 

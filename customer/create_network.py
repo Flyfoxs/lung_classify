@@ -28,9 +28,9 @@ import time
 from tqdm import tqdm
 
 import os
-def create_head(nf: int, ps: Floats = 0.5, concat_pool: bool = True, bn_final: bool = False):
+def create_head(nf: int, nc:int, ps: Floats = 0.5, concat_pool: bool = True, bn_final: bool = False):
     "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
-    lin_ftrs = [nf, 512]
+    lin_ftrs = [nf, 512, nc] if nc >0 else [nf, 512]
     ps = listify(ps)
     if len(ps) == 1: ps = [ps[0] / 2] * (len(lin_ftrs) - 2) + ps
     actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs) - 2) + [None]
@@ -42,7 +42,7 @@ def create_head(nf: int, ps: Floats = 0.5, concat_pool: bool = True, bn_final: b
     return nn.Sequential(*layers)
 
 
-def create_cnn_model(base_arch, cut: Union[int, Callable] = None, pretrained: bool = True,
+def create_cnn_model(base_arch, nc:int, cut: Union[int, Callable] = None, pretrained: bool = True,
                      lin_ftrs: Optional[Collection[int]] = None, ps: Floats = 0.5,
                      custom_head: Optional[nn.Module] = None,
                      bn_final: bool = False, concat_pool: bool = True):
@@ -50,16 +50,15 @@ def create_cnn_model(base_arch, cut: Union[int, Callable] = None, pretrained: bo
 
     print(type(base_arch), base_arch)
     body = create_body(base_arch, pretrained, cut)
+    body.requires_grad = False
 
     nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
 
-    head = create_head(nf, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
-
-    body.requires_grad = False
+    head = create_head(nf, nc,  ps=ps, concat_pool=concat_pool, bn_final=bn_final)
 
     model = nn.Sequential(body, head)
 
-    return nn.Sequential(model, nn.Linear(512, 128))
+    return model
 
 
 # model_res = create_cnn_model(models.resnet34, cut=None, pretrained=True, lin_ftrs=None, ps=0.5,
@@ -71,22 +70,31 @@ def create_cnn_model(base_arch, cut: Union[int, Callable] = None, pretrained: bo
 #         bn_final=False, concat_pool=True)
 
 class Net(nn.Module):
-    def __init__(self, subnet_list):
+    def __init__(self, subnet_list, nc):
         super().__init__()
 
         from functools import partial
-        create_backbone = partial(create_cnn_model, cut=None, pretrained=True, lin_ftrs=None, ps=0.5, custom_head=None, bn_final=False, concat_pool=True)
+        create_backbone = partial(create_cnn_model, nc=128, cut=None, pretrained=True, lin_ftrs=None, ps=0.5, custom_head=None, bn_final=False, concat_pool=True)
         #self.create_backbone(item).cuda() for item in [models.resnet34, models.densenet161, models.vgg19_bn] ]
 
         if isinstance(subnet_list, str) : subnet_list = subnet_list.split(',')
+        subnet_list = [item.strip() for item in subnet_list]
 
-        if 'resnet34' in subnet_list: self.model_res = create_backbone(models.resnet34)
+        print('subnet_list=', subnet_list)
 
-        if 'densenet161' in subnet_list: self.model_dense = create_backbone(models.densenet161)
+        # if 'vgg19_bn' in subnet_list: self.model_vgg19_bn = create_backbone(models.vgg19_bn)
+        #
+        # if 'resnet34' in subnet_list: self.model_res = create_backbone(models.resnet34)
+        #
+        # if 'densenet161' in subnet_list: self.model_dense = create_backbone(models.densenet161)
 
-        if 'vgg19_bn' in subnet_list: self.model_vgg19_bn = create_backbone(models.vgg19_bn)
+        for network_name in subnet_list:
+            import torchvision.models as to_models
+            backbone_fn = getattr(to_models, network_name)
+            backbone_tmp = create_backbone(backbone_fn)
+            setattr(self, f'ens_{network_name}', backbone_tmp)
 
-        self.fc3 = nn.Linear(128, 5)
+        self.fc3 = nn.Linear(128, nc)
 
     def forward(self, x):
         # x1 = self.model_res(x)
@@ -99,13 +107,16 @@ class Net(nn.Module):
         #print('self._modules.values', list(self._modules.values())[0])
         #x_all = functools.reduce(lambda a, b: a(x) + b(x), list(self._modules.values())[:-1])
 
+        if len(list(self._modules.values())) == 1:
+            return list(self._modules.values())[-1](x)
+
+        #print('==='*10, len(list(self._modules.values())))
         x_all = torch.zeros(1).cuda()
         for sub_model in list(self._modules.values())[:-1]:
             x_all = x_all + sub_model(x)
         #x_all = self.model_res(x) + self.model_dense(x) + self.model_vgg19_bn(x) +
 
-        x = self.fc3(x_all)
-        return F.log_softmax(x, dim=1)
+        return self.fc3(x_all)
 
 
 def get_backbone(backbone_name):
@@ -122,17 +133,36 @@ def get_backbone(backbone_name):
 
     return backbone
 
+def weights_init(m):
+    import torch.nn.init.xavier_uniform as xavier
+    if isinstance(m, nn.Linear):
+        xavier(m.weight.data)
+        xavier(m.bias.data)
+
 def get_network(backbone_conf, nc):
     if ',' in backbone_conf:
         backbone_conf = backbone_conf.split(',')
 
+    # Efficientent network
     if 'efficientnet-' in backbone_conf:
         model = EfficientNet.from_name(backbone_conf)
         model._fc = nn.Linear(1280, nc)
         return model
     else:
-        model = Net(backbone_conf)
-        return model.cuda()
+        model = Net(backbone_conf, nc).cuda()
+        # flatten_model = lambda m: sum(map(flatten_model, children_and_parameters(m)), []) if num_children(m) else [m]
+        # model_list = flatten_model(model)
+        # freeze_to = -3
+        # print(f'Lock to {freeze_to} layers, layer need to learn:====')
+        # for layer in model_list[freeze_to:]:
+        #     print(f'Layer need to learn: {layer}')
+        #     cond_init(layer, nn.init.kaiming_normal_)
+        #     layer.requires_grad = True
+        # for layer in model_list[:freeze_to]:
+        #     layer.requires_grad = False
+        # # print(model)
+        return model
+
 
 
 

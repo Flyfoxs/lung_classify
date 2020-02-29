@@ -6,36 +6,25 @@ cd ..
 mkdir -p log
 
 
-MODEL_NAMES=(
-  5cls_resnet50_unfreeze
-
-  5cls_resnet50
-
-  2cls_resnet50
-  #5cls_resnet34
-
-#  5cls_densenet201
-#  5cls_densenet161
-#
-#  2cls_resnet34
-#  2cls_resnet50
-
-)
-
 
 ##################################################################################
 # inference all models
 ##################################################################################
-for MODEL_NAME in ${MODEL_NAMES[@]}; do
-  for fold in {0..4}
-  do
+#for MODEL_NAME in ${MODEL_NAMES[@]}; do
 
-    CUDA_VISIBLE_DEVICES=$1 && python customer/classify.py main with conf_name=$MODEL_NAME fold=$fold  >> ./log/"$(hostname)"_$1.log 2>&1
-    #python -u core/train_lgb.py train -1 $fold >> log/lgb_m_$fold.log 2>&1
+
+
+search_dir=configs
+
+for version in {0..4}
+do
+  for fold in {0..0}
+  do
+    for conf_file in "$search_dir"/5cls_*.yaml
+    do
+      conf_file="$(basename $conf_file .yaml)"
+      CUDA_VISIBLE_DEVICES=$1 && python -u customer/classify.py main with conf_name=$conf_file fold=$fold version=c$version >> ./log/ens_"$(hostname)"_$1.log 2>&1
+      #python -u core/train_lgb.py train -1 $fold >> log/lgb_m_$fold.log 2>&1
+    done
   done
 done
-
-#CUDA_VISIBLE_DEVICES=3  &&   python train.py --config resources/train_config_ce.yaml
-
-
-

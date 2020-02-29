@@ -38,9 +38,11 @@ from sacred import Experiment
 from easydict import EasyDict as edict
 from sacred.observers import MongoObserver
 
+from customer.create_network import get_network
+import torchvision.models as to_models
 
 
-version = 'n16_tf2'
+version = 'sp01'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -94,9 +96,36 @@ class Recorder_scared(Recorder):
                 self.ex.log_scalar(name, round(float(stat), 4), step=epoch)
 
 
+def get_eff_learner(data, backbone_name = 'efficientnet-b0'):
+    eff = lambda dummy: EfficientNet.from_pretrained(backbone_name, num_classes=5)
+    model = eff(True)
+    model.requires_grad = False
+    model._fc.requires_grad = True
+    learn = Learner(data, model, metrics=[accuracy])
+    return learn
+
+
+def get_fastai_learn(data,  backbone_name = "resnet34" ):
+    backbone_fn = getattr(to_models, backbone_name)
+    learn = cnn_learner(data, backbone_fn,  metrics=[accuracy])
+    return learn
+
+
+def get_ens_learn(data,  backbone_name):
+    net = get_network(backbone_name, data.c)
+    learn = Learner(data, net, metrics=[accuracy])  #cnn_learner(data, backbone_fn, metrics=[accuracy])
+    return learn
+
+def get_test_learn(data,  backbone_name = "resnet34" ):
+    #backbone_fn = getattr(to_models, backbone_name)
+    from torchvision import models
+    tmp = models.resnet34(True)
+    tmp.fc.out_features = 5
+    learn = Learner(data, tmp, metrics=[accuracy])
+    return learn
+
+
 def train(valid_fold , conf_name):
-
-
     file_name = conf_name
     if not os.path.exists(file_name):
         print(f'Can not find file:{file_name}')
@@ -112,8 +141,6 @@ def train(valid_fold , conf_name):
 
     assert int(valid_fold) <= 4
     # batch_id = str(round(time.time()))
-
-
 
     df = pd.read_csv('./input/train.csv', names=['file_name', 'label'])
     df['fold'] = df.file_name%5
@@ -140,6 +167,7 @@ def train(valid_fold , conf_name):
 
     data = (ImageList.from_df(df, './input/train/', )
              .split_by_idx(df.loc[df.fold == valid_fold].index)
+             #.split_from_df('label')
              # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
              .label_from_df()
              # .add_test_folder('./input/test')
@@ -148,24 +176,33 @@ def train(valid_fold , conf_name):
     test_data = ImageList.from_folder(path="./input/test")
     data.add_test(test_data)
 
-    backbone = get_backbone(backbone_name)
-    learn = cnn_learner(data, backbone, metrics=[ accuracy])
+    # backbone = get_backbone(backbone_name)
 
-    # from customer.create_network import get_network
-    # model = get_network(backbone_name, data.c)
-    # learn = Learner(data, model, metrics=[ accuracy])
+    #print(to_models.resnet34())
+    # model_fun = to_models.resnet34
+    # model_name = model_fun.__name__
 
-    ch_prefix = os.path.basename(file_name)
-    checkpoint_name = f'{ch_prefix}_f{valid_fold}'
+    if ',' in backbone_name or isinstance(backbone_name, list):
+        learn = get_ens_learn(data,backbone_name)
+    elif 'eff' in backbone_name:
+        learn = get_eff_learner(data, backbone_name)
+    else:
+        learn = get_fastai_learn(data, backbone_name)
+
+    # learn = get_test_learn(data, backbone_name)
+
+
+    model_name = backbone_name
+    print(model_name, learn.model)
+
+    # ch_prefix = os.path.basename(file_name)
+    # checkpoint_name = f'{model_name}_f{valid_fold}'
     callbacks = [EarlyStoppingCallback(learn, monitor='accuracy', min_delta=1e-5, patience=5),
-                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement'),
+                 #SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement'),
                  Recorder_scared(ex, learn )
                  ]
 
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
-
-    if unfreeze:
-        learn.freeze_to(-1)
+    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, model_fun:{model_name}=========')
 
     learn.fit_one_cycle(epoch, callbacks=callbacks)
 
@@ -182,7 +219,6 @@ def train(valid_fold , conf_name):
     val_len = len(learn.data.valid_ds.items)
     train_len = len(learn.data.train_ds.items)
 
-
     from sklearn.metrics import accuracy_score
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
@@ -191,11 +227,6 @@ def train(valid_fold , conf_name):
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)
-
-
-
-
-
 
 ###### sacred begin
 from sacred import Experiment
@@ -206,7 +237,7 @@ from sacred import SETTINGS
 ex = Experiment('lung')
 db_url = 'mongodb://sample:password@10.10.20.103:27017/db?authSource=admin'
 ex.observers.append(MongoObserver(url=db_url, db_name='db'))
-SETTINGS.CAPTURE_MODE = 'sys'
+#SETTINGS.CAPTURE_MODE = 'sys'
 
 @ex.config
 def my_config():
@@ -227,6 +258,9 @@ if __name__ == '__main__':
 
     """"
     python -u customer/classify.py main with conf_name=5cls_resnet34  fold=0
+    python -u customer/classify.py main with conf_name=5cls_efficientnet-b0 fold=0 version=r1
+    python -u customer/classify.py main with conf_name=ens_res_den_vgg fold=0 version=r1
+    
     """
 
     from sacred.arg_parser import get_config_updates
@@ -235,6 +269,9 @@ if __name__ == '__main__':
     conf_name = config_updates.get('conf_name')
     fold = config_updates.get('fold')
 
+    if 'version' in config_updates : version = config_updates.get('version')
+
+    print(version)
 
     locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)
     task_id = f'lung_{conf_name}_{fold}'
@@ -245,5 +282,7 @@ if __name__ == '__main__':
                 'lock_id': lock_id,
                 'lock_name': task_id,
                 'version': version,
+                'GPU': os.environ.get('CUDA_VISIBLE_DEVICES'),
+                ** config_updates,
             })
             res = ex.run_commandline()

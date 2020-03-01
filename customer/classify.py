@@ -124,14 +124,22 @@ def get_test_learn(data,  backbone_name = "resnet34" ):
     learn = Learner(data, tmp, metrics=[accuracy])
     return learn
 
-
-def train(valid_fold , conf_name):
-    file_name = conf_name
+def get_file_conf(file_name):
+    if file_name is None:
+        return edict()
     if not os.path.exists(file_name):
-        print(f'Can not find file:{file_name}')
+        #print(f'Can not find file:{file_name}')
         file_name = f'./configs/{file_name}.yaml'
+    print(f'Find file conf:{file_name}')
     f = open(file_name)
     conf = edict(yaml.load(f))
+    return conf
+
+
+def train(sacred_conf):
+    valid_fold = sacred_conf.fold
+    image_size = sacred_conf.image_size
+    conf = sacred_conf
 
 
     # class_cnt = 5
@@ -171,7 +179,7 @@ def train(valid_fold , conf_name):
              # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
              .label_from_df()
              # .add_test_folder('./input/test')
-             .transform(get_transforms(), size=200)
+             .transform(get_transforms(), size=image_size)
              .databunch(bs=16)).normalize(imagenet_stats)
     test_data = ImageList.from_folder(path="./input/test")
     data.add_test(test_data)
@@ -202,7 +210,7 @@ def train(valid_fold , conf_name):
                  Recorder_scared(ex, learn )
                  ]
 
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, model_fun:{model_name}=========')
+    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, model_fun:{model_name}, image:{image_size} =========')
 
     learn.fit_one_cycle(epoch, callbacks=callbacks)
 
@@ -243,16 +251,14 @@ ex.observers.append(MongoObserver(url=db_url, db_name='db'))
 def my_config():
     conf_name = None
     fold = -1
+    image_size = 200
 
 
 @ex.command()
 def main(_config):
-
     config = edict(_config)
-    conf_name = config.conf_name
-    valid_fold = int(config.fold)
-
-    train(valid_fold, conf_name)
+    print('=====', config)
+    train(config)
 
 if __name__ == '__main__':
 
@@ -260,29 +266,36 @@ if __name__ == '__main__':
     python -u customer/classify.py main with conf_name=5cls_resnet34  fold=0
     python -u customer/classify.py main with conf_name=5cls_efficientnet-b0 fold=0 version=r1
     python -u customer/classify.py main with conf_name=ens_res_den_vgg fold=0 version=r1
-    
+    python -u customer/classify.py main with conf_name=5cls_efficientnet-b6 image_size=400 fold=0 version=r1
+
+    python -u customer/classify.py main with backbone=efficientnet-b3 image_size=300 fold=0 version=r1
+    python 
     """
 
     from sacred.arg_parser import get_config_updates
     import sys
-    config_updates, named_configs = get_config_updates(sys.argv[1:])
-    conf_name = config_updates.get('conf_name')
-    fold = config_updates.get('fold')
+    argv_conf, _ = get_config_updates(sys.argv[1:])
 
-    if 'version' in config_updates : version = config_updates.get('version')
+    conf_name = argv_conf.get('conf_name')
+    real_conf = get_file_conf(conf_name)
+    real_conf.update(argv_conf)
+    real_conf.conf_name = conf_name or real_conf.backbone
 
-    print(version)
+    print(real_conf)
+    if 'version' in real_conf : version = real_conf.get('version')
 
     locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)
-    task_id = f'lung_{conf_name}_{fold}'
+    task_id = f'lung_{real_conf}'
     #pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
     with locker.lock_block(task_id=task_id) as lock_id:
         if lock_id is not None:
             ex.add_config({
+                **real_conf,
                 'lock_id': lock_id,
                 'lock_name': task_id,
                 'version': version,
                 'GPU': os.environ.get('CUDA_VISIBLE_DEVICES'),
-                ** config_updates,
             })
+
+
             res = ex.run_commandline()

@@ -96,24 +96,59 @@ class Recorder_scared(Recorder):
                 self.ex.log_scalar(name, round(float(stat), 4), step=epoch)
 
 
-def get_eff_learner(data, backbone_name = 'efficientnet-b0'):
-    eff = lambda dummy: EfficientNet.from_pretrained(backbone_name, num_classes=5)
-    model = eff(True)
-    model.requires_grad = False
-    model._fc.requires_grad = True
+def get_cus_learner(conf, data, ):
+    backbone_name = conf.backbone
+
+    import torchvision.models as to_models
+
+    if backbone_name in dir(to_models):
+        model = getattr(to_models, backbone_name)(num_classes=5)
+    else:
+        eff = lambda : EfficientNet.from_pretrained(backbone_name, num_classes=5)
+        model = eff(True)
+
+    lock_layer = conf.lock_layer
+    print(f'lock_layer={lock_layer}')
+    for ct, child in enumerate(model.children()):
+        if ct < lock_layer:
+            for param in child.parameters():
+                param.requires_grad = False
+        else:
+            print(f'Train layer#{ct}:{child}')
+            for param in child.parameters():
+                param.requires_grad = True
+    print(f'There are {ct + 1} layers in {backbone_name}')
+    print(f'=='*20, '\n')
+
     learn = Learner(data, model, metrics=[accuracy])
     return learn
 
 
-def get_fastai_learn(data,  backbone_name = "resnet34" ):
+def get_fastai_learn(conf, data ):
+    backbone_name = conf.backbone
     backbone_fn = getattr(to_models, backbone_name)
     learn = cnn_learner(data, backbone_fn,  metrics=[accuracy])
+    learn.freeze_to(conf.lock_layer)
     return learn
 
 
-def get_ens_learn(data,  backbone_name):
-    net = get_network(backbone_name, data.c)
-    learn = Learner(data, net, metrics=[accuracy])  #cnn_learner(data, backbone_fn, metrics=[accuracy])
+def get_ens_learn(conf, data,):
+    backbone_name = conf.backbone
+    model = get_network(backbone_name, data.c)
+    lock_layer = conf.lock_layer
+    print(f'lock_layer={lock_layer}')
+    for ct, child in enumerate(model.children()):
+        if ct < lock_layer:
+            for param in child.parameters():
+                param.requires_grad = False
+        else:
+            print(f'Train layer#{ct}:{child}')
+            for param in child.parameters():
+                param.requires_grad = True
+    print(f'There are {ct + 1} layers in {backbone_name}')
+    print(f'==' * 20, '\n')
+
+    learn = Learner(data, model, metrics=[accuracy])  #cnn_learner(data, backbone_fn, metrics=[accuracy])
     return learn
 
 def get_test_learn(data,  backbone_name = "resnet34" ):
@@ -191,17 +226,18 @@ def train(sacred_conf):
     # model_name = model_fun.__name__
 
     if ',' in backbone_name or isinstance(backbone_name, list):
-        learn = get_ens_learn(data,backbone_name)
-    elif 'eff' in backbone_name:
-        learn = get_eff_learner(data, backbone_name)
+        learn = get_ens_learn(sacred_conf, data,)
+        print(learn.model)
+    elif 'raw' == conf.model_type:
+        learn = get_cus_learner(sacred_conf, data, )
     else:
-        learn = get_fastai_learn(data, backbone_name)
+        learn = get_fastai_learn(sacred_conf, data)
 
     # learn = get_test_learn(data, backbone_name)
 
 
     model_name = backbone_name
-    print(model_name, learn.model)
+    #print(model_name, learn.model)
 
     # ch_prefix = os.path.basename(file_name)
     # checkpoint_name = f'{model_name}_f{valid_fold}'
@@ -210,7 +246,7 @@ def train(sacred_conf):
                  Recorder_scared(ex, learn )
                  ]
 
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, model_fun:{model_name}, image:{image_size} =========')
+    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, type#{conf.model_type}, lock#{conf.lock_layer}, model:{model_name}, image:{image_size} =========')
 
     learn.fit_one_cycle(epoch, callbacks=callbacks)
 
@@ -230,7 +266,7 @@ def train(sacred_conf):
     from sklearn.metrics import accuracy_score
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
-    conf_name_base = os.path.basename(conf_name)
+    conf_name_base = backbone_name
     oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name_base}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
 
     print(f'Stacking file save to:{oof_file}')
@@ -252,6 +288,7 @@ def my_config():
     conf_name = None
     fold = -1
     image_size = 200
+    model_type = 'raw'
 
 
 @ex.command()
@@ -269,7 +306,12 @@ if __name__ == '__main__':
     python -u customer/classify.py main with conf_name=5cls_efficientnet-b6 image_size=400 fold=0 version=r1
 
     python -u customer/classify.py main with backbone=efficientnet-b3 image_size=300 fold=0 version=r1
-    python 
+    
+    
+    python -u customer/classify.py main with backbone=resnet34  fold=0  version=c0   model_type='fastai'  lock_layer=0 
+    
+    
+    python -u customer/classify.py main with conf_name=ens_res_den_vgg  fold=0  version=c0   model_type='fastai'  lock_layer=0 
     """
 
     from sacred.arg_parser import get_config_updates

@@ -1,2 +1,2 @@
-image_size: 256
-backbone: 'resnet50,densenet161,vgg19_bn'
+model_type: 'ens'
+backbone: 'resnet50, densenet161,vgg19_bn'

@@ -50,13 +50,15 @@ def create_cnn_model(base_arch, nc:int, cut: Union[int, Callable] = None, pretra
 
     print(type(base_arch), base_arch)
     body = create_body(base_arch, pretrained, cut)
-    body.requires_grad = False
+    # body.requires_grad = True
 
     nf = num_features_model(nn.Sequential(*body.children())) * (2 if concat_pool else 1)
 
     head = create_head(nf, nc,  ps=ps, concat_pool=concat_pool, bn_final=bn_final)
 
     model = nn.Sequential(body, head)
+
+
 
     return model
 
@@ -145,25 +147,19 @@ def get_network(backbone_conf, nc):
     if ',' in backbone_conf:
         backbone_conf = backbone_conf.split(',')
 
-    # Efficientent network
-    if 'efficientnet-' in backbone_conf:
-        model = EfficientNet.from_name(backbone_conf)
-        model._fc = nn.Linear(1280, nc)
-        return model
-    else:
-        model = Net(backbone_conf, nc).cuda()
-        # flatten_model = lambda m: sum(map(flatten_model, children_and_parameters(m)), []) if num_children(m) else [m]
-        # model_list = flatten_model(model)
-        # freeze_to = -3
-        # print(f'Lock to {freeze_to} layers, layer need to learn:====')
-        # for layer in model_list[freeze_to:]:
-        #     print(f'Layer need to learn: {layer}')
-        #     cond_init(layer, nn.init.kaiming_normal_)
-        #     layer.requires_grad = True
-        # for layer in model_list[:freeze_to]:
-        #     layer.requires_grad = False
-        # # print(model)
-        return model
+    model = Net(backbone_conf, nc).cuda()
+    # flatten_model = lambda m: sum(map(flatten_model, children_and_parameters(m)), []) if num_children(m) else [m]
+    # model_list = flatten_model(model)
+    # freeze_to = -3
+    # print(f'Lock to {freeze_to} layers, layer need to learn:====')
+    # for layer in model_list[freeze_to:]:
+    #     print(f'Layer need to learn: {layer}')
+    #     cond_init(layer, nn.init.kaiming_normal_)
+    #     layer.requires_grad = True
+    # for layer in model_list[:freeze_to]:
+    #     layer.requires_grad = False
+    # # print(model)
+    return model
 
 
 

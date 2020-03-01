@@ -1,2 +1,0 @@
-image_size: 400
-backbone: 'resnet50,densenet161,vgg19_bn'

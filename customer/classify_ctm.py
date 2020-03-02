@@ -6,6 +6,24 @@ import os
 from task_distribute.locker import task_locker
 from file_cache.cache import file_cache, logger, timed
 
+from glob import glob
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import shutil
+from torchvision import transforms
+from torchvision import models
+import torch
+from torch.autograd import Variable
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import lr_scheduler
+from torch import optim
+from torchvision.datasets import ImageFolder
+from torchvision.utils import make_grid
+from torch.utils.data import Dataset,DataLoader
+import time
+from tqdm import tqdm_notebook as tqdm
 
 from tqdm import tqdm, tqdm_notebook
 from glob import glob
@@ -19,13 +37,72 @@ import time
 import pandas as pd
 
 
+import pandas as pd
+import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
+from torchvision.datasets.folder import default_loader
+from albumentations.pytorch.functional import img_to_tensor
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
+from torchvision.datasets.folder import default_loader
+from albumentations.pytorch.functional import img_to_tensor
+
+
+class LungDataset(Dataset):
+
+    def __init__(self, csv_file, root_dir, fold=(0), transform=None, ):
+        """
+        Args:
+            csv_file (string): Path to the csv file with annotations.
+            root_dir (string): Directory with all the images.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.df = pd.read_csv(csv_file, names=['filename', 'label'])
+        if fold is not None:
+            self.df.fold = self.df.filename % 5
+            self.df = self.df.loc[self.df.fold.isin(fold)]
+        self.root_dir = root_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        img_name = os.path.join(self.root_dir,
+                                f'{self.df.iloc[idx, 0]}.jpg')
+        sample = cv2.imread(img_name)
+
+        # sample = sample.transpose((0, 1, 2))
+
+        if self.transform is not None:
+            sample = Image.fromarray(sample)
+            # print(type(sample))
+            sample = self.transform(sample)
+
+        # print(type(sample))
+        # tensor=img_to_tensor(sample)    # 将图片转化成tensor，
+
+        # print（tensor.shape）  #[3, 224, 224]
+        # sample = Variable(torch.unsqueeze(tensor, dim=0).float(), requires_grad=False)
+        # sample = Variable(tensor, requires_grad=False)
+        label = self.df.iloc[idx, 1]
+        return sample, label
+
 
 from fastai import *
 from fastai.vision import *
 from fastai.widgets import *
 
 from fastai.callbacks import EarlyStoppingCallback,SaveModelCallback
-import pydevd_pycharm
+
 
 from easydict import EasyDict as edict
 import yaml, os
@@ -37,7 +114,8 @@ from sacred.observers import MongoObserver
 
 
 
-version = '15'
+version = 'ctm15'
+is_cuda = True
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -65,6 +143,54 @@ def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
     return train, test
 
 
+def fit(epoch, model, data_loader, phase='training', volatile=False):
+    if phase == 'training':
+        model.train()
+    if phase == 'validation':
+        model.eval()
+        volatile = True
+    running_loss = 0.0
+    running_correct = 0
+
+    optimizer = optim.SGD(model.classifier.parameters(), lr = 0.0001, momentum = 0.5)
+
+    for batch_idx, (data, target) in tqdm(enumerate(data_loader), desc=f'{phase},{epoch:02}', total=len(data_loader)):
+        if is_cuda:
+            data, target = data.cuda(), target.cuda()
+        data, target = Variable(data, volatile), Variable(target)
+        if phase == 'training':
+            optimizer.zero_grad()
+        output = model(data)
+        loss = F.cross_entropy(output, target)
+
+        running_loss += F.cross_entropy(output, target, size_average=False).data  # [0]
+        preds = output.data.max(dim=1, keepdim=True)[1]
+        running_correct += preds.eq(target.data.view_as(preds)).cpu().sum()
+        if phase == 'training':
+            loss.backward()
+            optimizer.step()
+
+    loss = running_loss / len(data_loader.dataset)
+    accuracy = 100. * running_correct / len(data_loader.dataset)
+
+    print(
+        f'{phase} loss is {loss:{5}.{2}} and {phase} accuracy is {running_correct}/{len(data_loader.dataset)}{accuracy:{10}.{4}}')
+    return loss, accuracy
+
+
+def get_backbone(backbone_name):
+    if backbone_name == 'resnet34':
+        backbone = models.resnet34
+    elif backbone_name == 'resnet50':
+        backbone = models.resnet50
+    elif backbone_name == 'densenet161':
+        backbone = models.densenet161
+    elif backbone_name == 'densenet201':
+        backbone = models.densenet201
+    else:
+        raise Exception('No model')
+
+    return backbone
 
 
 def train(valid_fold , conf_name):
@@ -81,80 +207,50 @@ def train(valid_fold , conf_name):
     # batch_id = str(round(time.time()))
     backbone = get_backbone(backbone_name)
 
-    df = pd.read_csv('./input/train.csv', names=['file_name', 'label'])
-    df['fold'] = df.file_name%5
-    df['file_name'] = df.file_name.astype('str')+'.jpg'
+    class_cnt = 4
+    model = create_cnn_model(models.resnet34, class_cnt, cut=None, pretrained=True, lin_ftrs=None, ps=0.5,
+                             custom_head=None,
+                             bn_final=False, concat_pool=True)
 
-    #print(df.head(), df.shape)
-    if class_cnt <= 2:
-        df.label = np.where(df.label>=1, 1, 0)
+    print(model)
 
-    data = (ImageList.from_df(df, './input/train/', )
-             .split_by_idx(df.loc[df.fold == valid_fold].index)
-             # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
-             .label_from_df()
-             # .add_test_folder('./input/test')
-             .transform(get_transforms(), size=200)
-             .databunch(bs=16)).normalize(imagenet_stats)
+    backbone.classifier[-1].out_features = 5
+    for param in model.features.parameters(): param.requires_grad = False
 
-    test_data = ImageList.from_folder(path="./input/test")
+    transform = transforms.Compose([
+        transforms.Resize([256, 256]),
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
 
-    data.add_test(test_data)
+    ])
 
-    #data.show_batch(rows=3, figsize=(15,15))
+    train_folds = range(5)
+    train_folds.remove(4)
+    train = LungDataset('../input/train.csv', '../input/train/', fold=train_folds, transform=transform)
 
-    learn = cnn_learner(data, backbone, metrics=[ accuracy])
+    valid = LungDataset('../input/train.csv', '../input/train/', fold=(valid_fold,), transform=transform)
 
-    checkpoint_name = f'{backbone()._get_name()}_f{valid_fold}'
-    callbacks = [EarlyStoppingCallback(learn, monitor='accuracy', min_delta=1e-5, patience=5),
-                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement')
-                 ]
+    train_data_loader = torch.utils.data.DataLoader(train, batch_size=16, num_workers=3, shuffle=True)
+    valid_data_loader = torch.utils.data.DataLoader(valid, batch_size=16, num_workers=3, shuffle=True)
 
-    print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
+    # test = ImageFolder('/home/felix/pj/lung_classify/input/')
 
-    if unfreeze:
-        learn.freeze_to(-2)
+    train_losses, train_accuracy = [], []
+    val_losses, val_accuracy = [], []
+    for epoch in range(1, 20):
+        epoch_loss, epoch_accuracy = fit(epoch, model, train_data_loader, phase='training')
+        val_epoch_loss, val_epoch_accuracy = fit(epoch, model, valid_data_loader, phase='validation')
+        train_losses.append(epoch_loss)
+        train_accuracy.append(epoch_accuracy)
+        val_losses.append(val_epoch_loss)
+        val_accuracy.append(val_epoch_accuracy)
 
-    pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
-    learn.fit_one_cycle(epoch, callbacks=callbacks)
-
-    oof_val = get_oof_df(learn, DatasetType.Valid)
-
-    oof_test = get_oof_df(learn, DatasetType.Test)
-
-    os.makedirs('./output/stacking/', exist_ok=True)
-    import socket
-    host_name = socket.gethostname()
-    # score_list = np.array(learn.recorder.metrics)
-    # best_epoch = np.argmax(score_list)
-    # best_score = np.max(score_list)
-    val_len = len(learn.data.valid_ds.items)
-    train_len = len(learn.data.train_ds.items)
+        ex.log_scalar('train_losses', epoch_loss)
+        ex.log_scalar('train_accuracy', epoch_accuracy)
+        ex.log_scalar('val_losses', val_epoch_loss)
+        ex.log_scalar('val_accuracy', val_epoch_accuracy )
 
 
-    from sklearn.metrics import accuracy_score
-    best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
-
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
-
-    print(f'Stacking file save to:{oof_file}')
-    save_stack_feature(oof_val, oof_test, oof_file)
-
-
-
-def get_backbone(backbone_name):
-    if backbone_name == 'resnet34':
-        backbone = models.resnet34
-    elif backbone_name == 'resnet50':
-        backbone = models.resnet50
-    elif backbone_name == 'densenet161':
-        backbone = models.densenet161
-    elif backbone_name == 'densenet201':
-        backbone = models.densenet201
-    else:
-        raise Exception('No model')
-
-    return backbone
 
 
 ###### sacred begin
@@ -186,7 +282,7 @@ def main(_config):
 if __name__ == '__main__':
 
     """"
-    python -u customer/classify.py main with conf_name=5cls_resnet34  fold=0
+    python -u customer/classify_ctm.py main with conf_name=5cls_resnet34  fold=0
     """
 
     from sacred.arg_parser import get_config_updates

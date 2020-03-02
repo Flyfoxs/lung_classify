@@ -269,6 +269,7 @@ def my_config():
 def main(_config):
     conf = edict(_config)
     config = conf
+    print(conf)
 
     # file_name = config.conf_name
     # if not os.path.exists(file_name):
@@ -317,7 +318,7 @@ def main(_config):
             wait = wait + 1
 
         if wait >= patient:
-            print(f'Early stop wait {wait} epochs, and current epoch:{epoch}, fold:{valid_fold}, best:{best_score:6.5f}/{best_epoch:02}, {file_name} ')
+            print(f'Early stop wait {wait} epochs, and current epoch:{epoch}, fold:{valid_fold}, best:{best_score:6.5f}/{best_epoch:02}, {conf} ')
             break
 
     print('epoch_accuracy', epoch_accuracy )
@@ -326,7 +327,7 @@ def main(_config):
 if __name__ == '__main__':
 
     """" 
-    python -u customer/classify_ensemble.py main with conf_name=ens_res_den_vgg  fold=0
+    python -u customer/classify_ensemble.py main with conf_name=ens_res_den_vgg  fold=0  
     """
 
     from sacred.arg_parser import get_config_updates
@@ -338,7 +339,7 @@ if __name__ == '__main__':
     real_conf.update(argv_conf)
     real_conf.conf_name = conf_name or real_conf.backbone
 
-    print(real_conf)
+    print('====',real_conf)
     if 'version' in real_conf : version = real_conf.get('version')
 
     locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)

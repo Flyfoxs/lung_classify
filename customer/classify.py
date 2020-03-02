@@ -105,7 +105,7 @@ def get_cus_learner(conf, data, ):
         model = getattr(to_models, backbone_name)(num_classes=5)
     else:
         eff = lambda : EfficientNet.from_pretrained(backbone_name, num_classes=5)
-        model = eff(True)
+        model = eff()
 
     lock_layer = conf.lock_layer
     print(f'lock_layer={lock_layer}')
@@ -267,7 +267,7 @@ def train(sacred_conf):
     best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
 
     conf_name_base = backbone_name
-    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name_base}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
+    oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name_base}_{conf.model_type}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
 
     print(f'Stacking file save to:{oof_file}')
     save_stack_feature(oof_val, oof_test, oof_file)

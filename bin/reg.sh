@@ -29,7 +29,7 @@ for MODEL_NAME in ${MODEL_NAMES[@]}; do
   for fold in {0..4}
   do
 
-    CUDA_VISIBLE_DEVICES=$1 && python customer/classify.py main with conf_name=$MODEL_NAME fold=$fold  >> ./log/"$(hostname)"_$1.log 2>&1
+    CUDA_VISIBLE_DEVICES=$1 && python -u customer/reg.py main with conf_name=$MODEL_NAME fold=$fold  >> ./log/reg_"$(hostname)"_$1.log 2>&1
     #python -u core/train_lgb.py train -1 $fold >> log/lgb_m_$fold.log 2>&1
   done
 done

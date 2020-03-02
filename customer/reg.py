@@ -37,7 +37,7 @@ from sacred.observers import MongoObserver
 
 
 
-version = '15'
+version = 'r15'
 
 def get_oof_df(learn, ds_type ):
     res = learn.get_preds(ds_type=ds_type)
@@ -66,6 +66,20 @@ def save_stack_feature(train: pd.DataFrame, test: pd.DataFrame, file_path):
 
 
 
+def create_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5,
+                concat_pool:bool=True, bn_final:bool=False):
+    "Model head that takes `nf` features, runs through `lin_ftrs`, and about `nc` classes."
+    lin_ftrs = [nf, 512, nc] if lin_ftrs is None else [nf] + lin_ftrs + [nc]
+    ps = listify(ps)
+    if len(ps) == 1: ps = [ps[0]/2] * (len(lin_ftrs)-2) + ps
+    actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs)-2) + [None]
+    pool = AdaptiveConcatPool2d() if concat_pool else nn.AdaptiveAvgPool2d(1)
+    layers = [pool, Flatten()]
+    for ni,no,p,actn in zip(lin_ftrs[:-1], lin_ftrs[1:], ps, actns):
+        layers += bn_drop_lin(ni, no, True, p, actn)
+    if bn_final: layers.append(nn.BatchNorm1d(lin_ftrs[-1], momentum=0.01))
+    return nn.Sequential(*layers)
+
 
 def train(valid_fold , conf_name):
 
@@ -85,14 +99,14 @@ def train(valid_fold , conf_name):
     df['fold'] = df.file_name%5
     df['file_name'] = df.file_name.astype('str')+'.jpg'
 
-    #print(df.head(), df.shape)
-    if class_cnt <= 2:
-        df.label = np.where(df.label>=1, 1, 0)
+    # #print(df.head(), df.shape)
+    # if class_cnt <= 2:
+    #     df.label = np.where(df.label>=1, 1, 0)
 
     data = (ImageList.from_df(df, './input/train/', )
              .split_by_idx(df.loc[df.fold == valid_fold].index)
              # split_by_valid_func(lambda o: int(os.path.basename(o).split('.')[0])%5==i)
-             .label_from_df()
+             .label_from_df(cols='label', label_cls = FloatList)
              # .add_test_folder('./input/test')
              .transform(get_transforms(), size=200)
              .databunch(bs=16)).normalize(imagenet_stats)
@@ -103,11 +117,15 @@ def train(valid_fold , conf_name):
 
     #data.show_batch(rows=3, figsize=(15,15))
 
-    learn = cnn_learner(data, backbone, metrics=[ accuracy])
+    #head = create_head(nf, nc, lin_ftrs, ps=ps, concat_pool=concat_pool, bn_final=bn_final)
 
-    checkpoint_name = f'{backbone()._get_name()}_f{valid_fold}'
-    callbacks = [EarlyStoppingCallback(learn, monitor='accuracy', min_delta=1e-5, patience=5),
-                 SaveModelCallback(learn, monitor='accuracy', name=checkpoint_name, every='improvement')
+    learn = cnn_learner(data, backbone, metrics=[root_mean_squared_error], loss_func=nn.MSELoss(), custom_head=None)
+
+    print(learn.model)
+
+    checkpoint_name = f'{backbone()._get_name()}_rf{valid_fold}'
+    callbacks = [EarlyStoppingCallback(learn, monitor='root_mean_squared_error', min_delta=1e-5, patience=5),
+                 SaveModelCallback(learn, monitor='root_mean_squared_error', name=checkpoint_name, every='improvement')
                  ]
 
     print(f'=====Fold:{valid_fold}, Total epoch:{epoch}, {conf_name}, backbone:{backbone_name}=========')
@@ -132,7 +150,7 @@ def train(valid_fold , conf_name):
 
 
     from sklearn.metrics import accuracy_score
-    best_score = accuracy_score(oof_val.iloc[:, :-1].idxmax(axis=1), oof_val.iloc[:, -1])
+    best_score = accuracy_score(oof_val.iloc[:, 0].astype(int), oof_val.iloc[:, -1].astype(int))
 
     oof_file = f'./output/stacking/{version}_{host_name[:5]}_s{best_score:6.5f}_{conf_name}_f{valid_fold}_val{val_len}_trn{train_len}.h5'
 
@@ -183,6 +201,9 @@ def main(_config):
     train(valid_fold, conf_name)
 
 if __name__ == '__main__':
+    """"
+    python -u customer/reg.py main with conf_name=5cls_resnet34  fold=0
+    """
 
     from sacred.arg_parser import get_config_updates
     import sys

@@ -28,7 +28,7 @@ MODEL_NAME='default'
 for fold in {0..4}
 do
 
-  CUDA_VISIBLE_DEVICES=$1 && python customer/detector.py main with conf_name=$MODEL_NAME fold=$fold  >> ./log/"$(hostname)"_d_$1.log 2>&1
+  CUDA_VISIBLE_DEVICES=$1 && python -u customer/detector.py main with conf_name=$MODEL_NAME fold=$fold  >> ./log/"$(hostname)"_d_$1.log 2>&1
   #python -u core/train_lgb.py train -1 $fold >> log/lgb_m_$fold.log 2>&1
 done
 

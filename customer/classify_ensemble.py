@@ -40,6 +40,7 @@ from albumentations.pytorch.functional import img_to_tensor
 from sacred import Experiment
 from easydict import EasyDict as edict
 from sacred.observers import MongoObserver
+from customer.classify import get_file_conf
 
 class LungDataset(Dataset):
 
@@ -229,7 +230,7 @@ def fit(epoch, model, data_loader, phase='training', volatile=False):
     print(
         f'{phase} loss is {loss:{5}.{2}} and {phase} accuracy is {running_correct}/{len(data_loader.dataset)}{accuracy:{10}.{4}}')
 
-    return loss, accuracy
+    return loss, round(accuracy,4)
 
 
 
@@ -250,6 +251,8 @@ ex.observers.append(MongoObserver(url=db_url, db_name='db'))
 def my_config():
     conf_name = None
     fold = -1
+    image_size = 200
+    lock_layer = 0
 
 
 # @ex.command()
@@ -264,14 +267,15 @@ def my_config():
 
 @ex.command()
 def main(_config):
-    config = edict(_config)
+    conf = edict(_config)
+    config = conf
 
-    file_name = config.conf_name
-    if not os.path.exists(file_name):
-        print(f'Can not find file:{file_name}')
-        file_name = f'./configs/{file_name}.yaml'
-    f = open(file_name)
-    conf = edict(yaml.load(f))
+    # file_name = config.conf_name
+    # if not os.path.exists(file_name):
+    #     print(f'Can not find file:{file_name}')
+    #     file_name = f'./configs/{file_name}.yaml'
+    # f = open(file_name)
+    # conf = edict(yaml.load(f))
 
     model = Net(conf.backbone)
     valid_fold = int(config.fold)
@@ -289,14 +293,16 @@ def main(_config):
 
     train_data_loader, valid_data_loader = get_dl(valid_fold, conf.image_size)
     print(conf)
-    for epoch in tqdm(range(1, 30), desc='epoch'):
+    total_epoch = 30
+    print(f'=====Fold:{valid_fold}, Total epoch:{total_epoch}, type#{conf.model_type}, lock#{conf.lock_layer}, model:{conf.backbone}, image:{conf.image_size} =========')
+    for epoch in tqdm(range(1, total_epoch), desc='epoch'):
         epoch_loss, epoch_accuracy = fit(epoch, model, train_data_loader, phase='training')
+        val_epoch_loss, val_epoch_accuracy = fit(epoch, model, valid_data_loader, phase='validation')
+
         ex.log_scalar('train.acc', epoch_accuracy, step=epoch)
         ex.log_scalar('train.loss', epoch_loss, step=epoch)
-
-        val_epoch_loss, val_epoch_accuracy = fit(epoch, model, valid_data_loader, phase='validation')
         ex.log_scalar('val.loss', val_epoch_loss, step=epoch)
-        ex.log_scalar('val.acc', val_epoch_accuracy, step=epoch)
+        ex.log_scalar('accuracy', val_epoch_accuracy, step=epoch)
 
         train_losses.append(epoch_loss)
         train_accuracy.append(epoch_accuracy)
@@ -325,21 +331,30 @@ if __name__ == '__main__':
 
     from sacred.arg_parser import get_config_updates
     import sys
-    config_updates, named_configs = get_config_updates(sys.argv[1:])
-    conf_name = config_updates.get('conf_name')
-    fold = config_updates.get('fold')
+    argv_conf, _ = get_config_updates(sys.argv[1:])
 
+    conf_name = argv_conf.get('conf_name')
+    real_conf = get_file_conf(conf_name)
+    real_conf.update(argv_conf)
+    real_conf.conf_name = conf_name or real_conf.backbone
+
+    print(real_conf)
+    if 'version' in real_conf : version = real_conf.get('version')
 
     locker = task_locker('mongodb://sample:password@10.10.20.103:27017/db?authSource=admin', remove_failed =9 , version=version)
-    task_id = f'lung_{conf_name}_{fold}'
+    task_id = f'lung_{real_conf}'
     #pydevd_pycharm.settrace('192.168.1.101', port=1234, stdoutToServer=True, stderrToServer=True)
     with locker.lock_block(task_id=task_id) as lock_id:
         if lock_id is not None:
             ex.add_config({
+                **real_conf,
                 'lock_id': lock_id,
                 'lock_name': task_id,
                 'version': version,
+                'GPU': os.environ.get('CUDA_VISIBLE_DEVICES'),
             })
+
+
             res = ex.run_commandline()
 
 

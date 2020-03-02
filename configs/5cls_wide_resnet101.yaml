@@ -1,2 +1,3 @@
-class_cnt: 5
+image_size: 300
+model_type: 'raw'
 backbone: 'wide_resnet101_2'
